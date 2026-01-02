@@ -1,3 +1,4 @@
+pub mod byte_buffer;
 use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
 
 //a slot in the ring buffer containing data and its epoch

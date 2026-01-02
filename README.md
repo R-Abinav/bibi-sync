@@ -1,2 +1,2 @@
 # bibi-sync
-A Rust lock-free shared memory transport for single-host AUVs
+A Rust lock-free shared memory transport for single-host robotic systems!
