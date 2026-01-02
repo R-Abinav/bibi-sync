@@ -1,22 +1,34 @@
 pub mod byte_buffer;
+
+use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
 
 //a slot in the ring buffer containing data and its epoch
-pub struct Slot<T>{
+struct SlotInner<T>{
     data: T,
-    epoch: AtomicU64,  //epoch when this slot was last written
+    epoch: u64,  //epoch when this slot was last written
+}
+
+pub struct Slot<T>{
+    inner: UnsafeCell<SlotInner<T>>,
 }
 
 impl<T: Default> Slot<T>{
     fn default() -> Self{
         Slot{
-            data: T::default(),
-            epoch: AtomicU64::new(0),
+            inner: UnsafeCell::new(SlotInner{
+                data: T::default(),
+                epoch: 0,
+            }),
         }
     }
 }
 
 //SPSC lock free ring buffer with per-slot epochs
+//safety rules:
+//1. only one thread may call push() (producer)
+//2. only one thread may call pop() (consumer)
+//3. multiple threads may call peek methods (read only stuff)
 pub struct RingBuffer<T>{
     buffer: Vec<Slot<T>>,
     head:AtomicUsize,
@@ -25,6 +37,10 @@ pub struct RingBuffer<T>{
     read_epoch: AtomicU64, //reader's last seen epoch
     capacity: usize,
 }
+
+//safety -> Safe for SPSC (one producer, one consumer)
+unsafe impl<T: Send> Send for RingBuffer<T> {}
+unsafe impl<T: Send> Sync for RingBuffer<T> {}
 
 impl<T: Clone + Default> RingBuffer<T>{
     //creating a new ring buffer with given capacity
@@ -47,6 +63,14 @@ impl<T: Clone + Default> RingBuffer<T>{
         }
     }
 
+    #[inline]
+    unsafe fn slot_inner(&self, index: usize) -> &mut SlotInner<T>{
+        unsafe{
+            &mut *self.buffer[index].inner.get()
+        }
+    }
+
+
     //check if buffer is empty usign epoch comparision
     fn is_empty_internal(&self, head: usize, tail: usize) -> bool{
         if head != tail{
@@ -54,7 +78,10 @@ impl<T: Clone + Default> RingBuffer<T>{
         }
         //head equals tail
         //check epochs to confirm if empty 
-        let slot_epoch = self.buffer[head].epoch.load(Ordering::Acquire);
+        let slot_epoch = unsafe {
+            (*self.buffer[head].inner.get()).epoch
+        };
+        
         let read_epoch = self.read_epoch.load(Ordering::Acquire);
 
         //empty -> reader has seen the current slot (slot_e <= read_e)
@@ -68,7 +95,9 @@ impl<T: Clone + Default> RingBuffer<T>{
 
         //head == tail
         //check epochs to confirm if fukk
-        let slot_epoch = self.buffer[head].epoch.load(Ordering::Acquire);
+        let slot_epoch = unsafe {
+            (*self.buffer[head].inner.get()).epoch
+        };
         let read_epoch = self.read_epoch.load(Ordering::Acquire);
 
         //full -> writer is ahead
@@ -78,14 +107,16 @@ impl<T: Clone + Default> RingBuffer<T>{
 
     //push item to buffer
     //return the epoch num. of the push
-    pub fn push(&mut self, item: T) -> u64{
+    pub fn push(&self, item: T) -> u64{
         let head = self.head.load(Ordering::Relaxed);
-         let tail = self.tail.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Acquire);
 
         //check if full (freshness bias, discard old)
         if self.is_full_internal(head, tail){
             //buffer is full, advance to discard oldest
-            let slot_epoch = self.buffer[tail].epoch.load(Ordering::Acquire);
+            let slot_epoch = unsafe {
+                (*self.buffer[tail].inner.get()).epoch
+            };  
             self.read_epoch.store(slot_epoch, Ordering::Release);
             let new_tail = (tail + 1) % self.capacity;
             self.tail.store(new_tail, Ordering::Release);
@@ -95,22 +126,24 @@ impl<T: Clone + Default> RingBuffer<T>{
         let new_epoch = self.write_epoch.load(Ordering::Relaxed) + 1;
         self.write_epoch.store(new_epoch, Ordering::Relaxed);
 
-        //write data to slot
-        self.buffer[head].data = item;
-
-        //publish epoch after data (mem ord.)
-        self.buffer[head].epoch.store(new_epoch, Ordering::Release);
+        //safety -> single producer guarantees exclusive write access
+        unsafe {
+            let slot = self.slot_inner(head);
+            slot.data = item;
+            std::sync::atomic::fence(Ordering::Release);
+            slot.epoch = new_epoch;
+        }
 
         //increment head
-        let next_head = (head + 1) % self.capacity;
-        self.head.store(next_head, Ordering::Release);
+        let new_head = (head + 1) % self.capacity;
+        self.head.store(new_head, Ordering::Release);
 
         return new_epoch;
     }
 
     //pop fn
     //pop the oldest item from buffer
-    pub fn pop(&mut self) -> Option<T>{
+    pub fn pop(&self) -> Option<T>{
         let tail = self.tail.load(Ordering::Relaxed);
         let head = self.head.load(Ordering::Acquire);
 
@@ -118,9 +151,12 @@ impl<T: Clone + Default> RingBuffer<T>{
             return None; //empty
         }
 
-        //read data from slot
-        let item = self.buffer[tail].data.clone();
-        let slot_epoch = self.buffer[tail].epoch.load(Ordering::Acquire);
+        //safety -> single consumer guarantees exclusive read access
+        let (item, slot_epoch) = unsafe {
+            let slot = &*self.buffer[tail].inner.get();
+            std::sync::atomic::fence(Ordering::Acquire);
+            (slot.data.clone(), slot.epoch)
+        };
 
         //update reader's epoch to mark this slot as 'seen'
         self.read_epoch.store(slot_epoch, Ordering::Release);
@@ -148,10 +184,10 @@ impl<T: Clone + Default> RingBuffer<T>{
             head - 1
         };
 
-        let epoch = self.buffer[latest_idx].epoch.load(Ordering::Acquire);
-        let data = self.buffer[latest_idx].data.clone();
-
-        return Some((data, epoch));
+        unsafe{
+            let slot = &*self.buffer[latest_idx].inner.get();
+            return Some((slot.data.clone(), slot.epoch));
+        }
     }
 
     //peek latest without owning (zero copy) | ret None if empty
@@ -170,10 +206,10 @@ impl<T: Clone + Default> RingBuffer<T>{
             head - 1
         };
 
-        let slot = &self.buffer[latest_idx];
-        let epoch = slot.epoch.load(Ordering::Acquire);
-
-        return Some((&slot.data, epoch));
+        unsafe{
+            let slot = &*self.buffer[latest_idx].inner.get();
+            return Some((&slot.data, slot.epoch));
+        }
     }
 
     //peek item at tail (oldest) without owning | ret None if empty
@@ -185,10 +221,10 @@ impl<T: Clone + Default> RingBuffer<T>{
             return None;
         }
 
-        let slot = &self.buffer[tail];
-        let epoch = slot.epoch.load(Ordering::Acquire);
-
-        return Some((&slot.data, epoch));
+        unsafe{
+            let slot = &*self.buffer[tail].inner.get();
+            return Some((&slot.data, slot.epoch));
+        }
     }
 
     //get the latest epoch (for freshness detection yo)
@@ -240,10 +276,12 @@ impl<T: Clone + Default> RingBuffer<T>{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
     fn test_push_pop_fifo() {
-        let mut rb: RingBuffer<i32> = RingBuffer::new(5);
+        let rb: RingBuffer<i32> = RingBuffer::new(5);
         
         rb.push(10);
         rb.push(20);
@@ -257,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_wraparound() {
-        let mut rb: RingBuffer<i32> = RingBuffer::new(3);
+        let rb: RingBuffer<i32> = RingBuffer::new(3);
         
         rb.push(1);
         rb.push(2);
@@ -275,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_epoch_increment() {
-        let mut rb: RingBuffer<i32> = RingBuffer::new(5);
+        let rb: RingBuffer<i32> = RingBuffer::new(5);
         
         let e1 = rb.push(10);
         let e2 = rb.push(20);
@@ -287,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_overflow_discards_old() {
-        let mut rb: RingBuffer<i32> = RingBuffer::new(3);
+        let rb: RingBuffer<i32> = RingBuffer::new(3);
         
         rb.push(1);
         rb.push(2);
@@ -306,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_full_capacity_usable() {
-        let mut rb: RingBuffer<i32> = RingBuffer::new(3);
+        let rb: RingBuffer<i32> = RingBuffer::new(3);
         
         rb.push(1);
         rb.push(2);
@@ -320,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_peek_latest() {
-        let mut rb: RingBuffer<i32> = RingBuffer::new(5);
+        let rb: RingBuffer<i32> = RingBuffer::new(5);
         
         rb.push(10);
         rb.push(20);
@@ -337,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_peek_ref() {
-        let mut rb: RingBuffer<i32> = RingBuffer::new(5);
+        let rb: RingBuffer<i32> = RingBuffer::new(5);
         
         rb.push(10);
         rb.push(20);
@@ -358,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_slot_epoch_freshness() {
-        let mut rb: RingBuffer<i32> = RingBuffer::new(3);
+        let rb: RingBuffer<i32> = RingBuffer::new(3);
         
         let e1 = rb.push(100);
         let e2 = rb.push(200);
@@ -372,5 +410,34 @@ mod tests {
         
         let e3 = rb.push(300);
         assert_eq!(e3, 3);
+    }
+
+    //multi threaded spsc tests
+    #[test]
+    fn test_spsc_threaded() {
+        let rb = Arc::new(RingBuffer::<i32>::new(1024));
+        let rb_producer = Arc::clone(&rb);
+        let rb_consumer = Arc::clone(&rb);
+        let num_items: i32 = 1000;
+        
+        let producer = thread::spawn(move || {
+            for i in 0..num_items {
+                rb_producer.push(i);
+            }
+        });
+        let consumer = thread::spawn(move || {
+            let mut received = Vec::new();
+            while received.len() < num_items as usize {
+                if let Some(val) = rb_consumer.pop() {
+                    received.push(val);
+                }
+            }
+            return received;
+        });
+        producer.join().unwrap();
+        let received = consumer.join().unwrap();
+        for i in 1..received.len() {
+            assert!(received[i] > received[i - 1], "FIFO order violated!");
+        }
     }
 }
