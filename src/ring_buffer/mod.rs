@@ -132,7 +132,7 @@ impl<T: Clone + Default> RingBuffer<T>{
         return Some(item);
     }
 
-    //peek at latest item without removing (for subscribers!!)
+    //peek at latest item without removing but we clone (for subscribers!!)
     pub fn peek_latest(&self) -> Option<(T, u64)>{
         let head = self.head.load(Ordering::Acquire);
         let tail = self.tail.load(Ordering::Acquire);
@@ -152,6 +152,43 @@ impl<T: Clone + Default> RingBuffer<T>{
         let data = self.buffer[latest_idx].data.clone();
 
         return Some((data, epoch));
+    }
+
+    //peek latest without owning (zero copy) | ret None if empty
+    pub fn peek_latest_ref(&self) -> Option<(&T, u64)>{
+        let head = self.head.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Acquire);
+
+        if self.is_empty_internal(head, tail){
+            return None;
+        }
+
+        //latest item is at (head - 1 + capacity) % capacity
+        let latest_idx = if head == 0{
+            self.capacity - 1
+        }else{
+            head - 1
+        };
+
+        let slot = &self.buffer[latest_idx];
+        let epoch = slot.epoch.load(Ordering::Acquire);
+
+        return Some((&slot.data, epoch));
+    }
+
+    //peek item at tail (oldest) without owning | ret None if empty
+    pub fn peek_oldest_ref(&self) -> Option<(&T, u64)>{
+        let tail = self.tail.load(Ordering::Acquire);
+        let head = self.head.load(Ordering::Acquire);
+
+        if self.is_empty_internal(tail, head){
+            return None;
+        }
+
+        let slot = &self.buffer[tail];
+        let epoch = slot.epoch.load(Ordering::Acquire);
+
+        return Some((&slot.data, epoch));
     }
 
     //get the latest epoch (for freshness detection yo)
@@ -295,6 +332,27 @@ mod tests {
         assert_eq!(epoch, 3);
         
         //still 3 items
+        assert_eq!(rb.len(), 3);
+    }
+
+    #[test]
+    fn test_zero_copy_peek_ref() {
+        let mut rb: RingBuffer<i32> = RingBuffer::new(5);
+        
+        rb.push(10);
+        rb.push(20);
+        rb.push(30);
+        
+        //zero-copy peek (returns reference, no clone!)
+        let (val_ref, epoch) = rb.peek_latest_ref().unwrap();
+        assert_eq!(*val_ref, 30);
+        assert_eq!(epoch, 3);
+        
+        //oldest is 10
+        let (oldest_ref, _) = rb.peek_oldest_ref().unwrap();
+        assert_eq!(*oldest_ref, 10);
+        
+        //still 3 items (peek doesn't consume)
         assert_eq!(rb.len(), 3);
     }
 

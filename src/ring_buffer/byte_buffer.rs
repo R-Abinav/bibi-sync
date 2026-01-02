@@ -135,10 +135,32 @@ impl ByteRingBuffer{
         self.tail.store(new_tail, Ordering::Release);
 
         return Some((data, epoch));
+    } 
+
+    //this function peeks at the latest msg, but returns owned Vec (clones data)
+    pub fn peek_latest(&self) -> Option<(Vec<u8>, u64)>{
+        let head = self.head.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Acquire);
+
+        if self.is_empty_internal(head, tail){
+            return None;
+        }
+
+        let latest_idx = if head == 0{
+            self.capacity - 1
+        }else{
+            head - 1
+        };
+
+        let slot = &self.buffer[latest_idx]; //borrow, we not moving
+        let len = slot.len as usize;
+
+        return Some((slot.data[..len].to_vec(), slot.epoch));
+
     }
 
-    //peek latest msg without consuming (zero copy read via slice)
-    pub fn peek_latest(&self) -> Option<(&[u8], u64)>{
+    //peek latest msg without owning (zero copy read via slice)
+    pub fn peek_latest_ref(&self) -> Option<(&[u8], u64)>{
         let head = self.head.load(Ordering::Acquire);
         let tail = self.tail.load(Ordering::Acquire);
 
@@ -156,6 +178,21 @@ impl ByteRingBuffer{
         let len = slot.len as usize;
 
         return Some((&slot.data[..len], slot.epoch));
+    }
+
+    //peek oldest msg without owning (zero copy read via slice)
+    pub fn peek_oldest_ref(&self) -> Option<(&[u8], u64)>{
+        let head = self.head.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Acquire);
+
+        if self.is_empty_internal(head, tail){
+            return None;
+        }
+
+        let slot = &self.buffer[tail];
+        let len = slot.len as usize;
+
+        return Some((&slot.data[..len], slot.epoch));   
     }
 
     //latest epoch
@@ -259,7 +296,7 @@ mod tests {
         rb.push(&[10, 20, 30]);
 
         //peek returns slice, not Vec (zero-copy!)
-        let (slice, epoch) = rb.peek_latest().unwrap();
+        let (slice, epoch) = rb.peek_latest_ref().unwrap();
         assert_eq!(slice, &[10, 20, 30]);
         assert_eq!(epoch, 2);
 
@@ -280,5 +317,47 @@ mod tests {
 
         let (data, _) = rb.pop().unwrap();
         assert_eq!(data, vec![2, 2]);  //first was discarded
+    }
+
+    #[test]
+    fn test_peek_latest_owned() {
+        let mut rb = ByteRingBuffer::new(4);
+
+        rb.push(&[1, 2, 3]);
+        rb.push(&[10, 20, 30, 40]);
+
+        //owned peek (clones data)
+        let (data, epoch) = rb.peek_latest().unwrap();
+        assert_eq!(data, vec![10, 20, 30, 40]);
+        assert_eq!(epoch, 2);
+
+        //buffer still has 2 items
+        assert_eq!(rb.len(), 2);
+    }
+
+    #[test]
+    fn test_peek_oldest_ref() {
+        let mut rb = ByteRingBuffer::new(4);
+
+        rb.push(&[1, 2, 3]);
+        rb.push(&[10, 20]);
+        rb.push(&[100]);
+
+        //oldest is first pushed
+        let (slice, epoch) = rb.peek_oldest_ref().unwrap();
+        assert_eq!(slice, &[1, 2, 3]);
+        assert_eq!(epoch, 1);
+
+        //still 3 items
+        assert_eq!(rb.len(), 3);
+    }
+
+    #[test]
+    fn test_peek_methods_empty_buffer() {
+        let rb = ByteRingBuffer::new(4);
+
+        assert!(rb.peek_latest().is_none());
+        assert!(rb.peek_latest_ref().is_none());
+        assert!(rb.peek_oldest_ref().is_none());
     }
 }
