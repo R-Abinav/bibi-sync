@@ -1,0 +1,12 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "bibi_sync"
+version = "0.1.0"
+description = "BiBi-Sync: Lock-free SPSC ring buffers for single host robotics"
+requires-python = ">=3.8"
+
+[tool.maturin]
+features = ["python"]

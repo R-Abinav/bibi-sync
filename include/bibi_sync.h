@@ -6,6 +6,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SLOT_SIZE 256
 
 #define HEADER_SIZE 12
@@ -61,5 +65,9 @@ int32_t bibi_typed_topic_try_receive(struct BibiTypedTopic *topic, uint8_t *out_
 int32_t bibi_typed_topic_peek_latest(struct BibiTypedTopic *topic,
                                      uint8_t *out_data,
                                      uint64_t *out_epoch);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BIBI_SYNC_H */
