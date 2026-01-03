@@ -1,6 +1,7 @@
 pub mod ring_buffer;
 pub mod pubsub;
 pub mod ffi;
+pub mod uart;
 
 #[cfg(feature = "python")]
 pub mod python;
@@ -15,3 +16,8 @@ pub use pubsub::{
     TopicRegistry,
 };
 
+pub use uart::{
+    UartBridge, MsgType, 
+    ImuMsg, OrientationMsg, DepthMsg, 
+    ThrusterPwmCmd, LedCmd, CalibrationCmd,
+};

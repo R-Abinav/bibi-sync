@@ -6,15 +6,27 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #define SLOT_SIZE 256
 
 #define HEADER_SIZE 12
 
 #define MAX_PAYLOAD_SIZE (SLOT_SIZE - HEADER_SIZE)
+
+#define SYNC_BYTE 170
+
+#define MAX_MSG_SIZE 244
+
+#define IMU_MSG_SIZE 36
+
+#define ORIENTATION_MSG_SIZE 12
+
+#define DEPTH_MSG_SIZE 4
+
+#define THRUSTER_PWM_SIZE 24
+
+#define LED_CMD_SIZE 2
+
+#define CALIBRATION_CMD_SIZE 1
 
 typedef struct BibiByteTopic BibiByteTopic;
 
@@ -65,9 +77,5 @@ int32_t bibi_typed_topic_try_receive(struct BibiTypedTopic *topic, uint8_t *out_
 int32_t bibi_typed_topic_peek_latest(struct BibiTypedTopic *topic,
                                      uint8_t *out_data,
                                      uint64_t *out_epoch);
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* BIBI_SYNC_H */

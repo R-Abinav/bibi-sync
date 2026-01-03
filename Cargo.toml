@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 libc = "0.2"
 pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
+serialport = "4.3"
 
 [features]
 default = []
