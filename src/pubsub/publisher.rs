@@ -65,7 +65,7 @@ mod tests{
         assert_eq!(publisher.topic_name(), "/test");
         assert_eq!(topic.len(), 2);
     }
-    
+
     #[test]
     fn test_byte_publisher(){
         let topic = Arc::new(ByteTopic::new("/bytes", 8));
