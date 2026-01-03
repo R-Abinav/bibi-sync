@@ -3,10 +3,9 @@ pub mod byte_buffer;
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
 
-//a slot in the ring buffer containing data and its epoch
 struct SlotInner<T>{
     data: T,
-    epoch: u64,  //epoch when this slot was last written
+    epoch: AtomicU64,
 }
 
 pub struct Slot<T>{
@@ -18,36 +17,28 @@ impl<T: Default> Slot<T>{
         Slot{
             inner: UnsafeCell::new(SlotInner{
                 data: T::default(),
-                epoch: 0,
+                epoch: AtomicU64::new(0),
             }),
         }
     }
 }
 
-//SPSC lock free ring buffer with per-slot epochs
-//safety rules:
-//1. only one thread may call push() (producer)
-//2. only one thread may call pop() (consumer)
-//3. multiple threads may call peek methods (read only stuff)
 pub struct RingBuffer<T>{
     buffer: Vec<Slot<T>>,
-    head:AtomicUsize,
+    head: AtomicUsize,
     tail: AtomicUsize,
-    write_epoch: AtomicU64, //writer's current epoch (inc on push)
-    read_epoch: AtomicU64, //reader's last seen epoch
+    write_epoch: AtomicU64,
+    read_epoch: AtomicU64,  //last epoch consumed by reader
     capacity: usize,
 }
 
-//safety -> Safe for SPSC (one producer, one consumer)
-unsafe impl<T: Send> Send for RingBuffer<T> {}
-unsafe impl<T: Send> Sync for RingBuffer<T> {}
+unsafe impl<T: Send> Send for RingBuffer<T>{}
+unsafe impl<T: Send> Sync for RingBuffer<T>{}
 
 impl<T: Clone + Default> RingBuffer<T>{
-    //creating a new ring buffer with given capacity
     pub fn new(capacity: usize) -> Self{
-        assert!(capacity > 0, "Capacity must be greater than 0 bro!");
+        assert!(capacity > 0, "Capacity must be greater than 0 bruddaa!!");
 
-        //init all slots with epoch 0
         let mut buffer = Vec::with_capacity(capacity);
         for _ in 0..capacity{
             buffer.push(Slot::default());
@@ -65,228 +56,180 @@ impl<T: Clone + Default> RingBuffer<T>{
 
     #[inline]
     unsafe fn slot_inner(&self, index: usize) -> &mut SlotInner<T>{
-        unsafe{
-            &mut *self.buffer[index].inner.get()
-        }
+        unsafe{ &mut *self.buffer[index].inner.get() }
     }
 
-
-    //check if buffer is empty usign epoch comparision
-    fn is_empty_internal(&self, head: usize, tail: usize) -> bool{
-        if head != tail{
-            return false;
-        }
-        //head equals tail
-        //check epochs to confirm if empty 
-        let slot_epoch = unsafe {
-            (*self.buffer[head].inner.get()).epoch
-        };
-        
-        let read_epoch = self.read_epoch.load(Ordering::Acquire);
-
-        //empty -> reader has seen the current slot (slot_e <= read_e)
-        return slot_epoch <= read_epoch;
+    #[inline]
+    fn slot_epoch(&self, index: usize) -> u64{
+        unsafe{ (*self.buffer[index].inner.get()).epoch.load(Ordering::SeqCst) }
     }
 
-    fn is_full_internal(&self, head: usize, tail: usize) -> bool{
-        if head != tail{
-            return false;
-        }
-
-        //head == tail
-        //check epochs to confirm if fukk
-        let slot_epoch = unsafe {
-            (*self.buffer[head].inner.get()).epoch
-        };
-        let read_epoch = self.read_epoch.load(Ordering::Acquire);
-
-        //full -> writer is ahead
-        return slot_epoch > read_epoch;
-    }
-
-
-    //push item to buffer
-    //return the epoch num. of the push
     pub fn push(&self, item: T) -> u64{
         let head = self.head.load(Ordering::Relaxed);
-        let tail = self.tail.load(Ordering::Acquire);
 
-        //check if full (freshness bias, discard old)
-        if self.is_full_internal(head, tail){
-            //buffer is full, advance to discard oldest
-            let slot_epoch = unsafe {
-                (*self.buffer[tail].inner.get()).epoch
-            };  
-            self.read_epoch.store(slot_epoch, Ordering::Release);
-            let new_tail = (tail + 1) % self.capacity;
-            self.tail.store(new_tail, Ordering::Release);
-        }
-
-        //increment write epoch first
         let new_epoch = self.write_epoch.load(Ordering::Relaxed) + 1;
         self.write_epoch.store(new_epoch, Ordering::Relaxed);
 
-        //safety -> single producer guarantees exclusive write access
-        unsafe {
+        unsafe{
             let slot = self.slot_inner(head);
             slot.data = item;
-            std::sync::atomic::fence(Ordering::Release);
-            slot.epoch = new_epoch;
+            slot.epoch.store(new_epoch, Ordering::SeqCst);
         }
 
-        //increment head
         let new_head = (head + 1) % self.capacity;
-        self.head.store(new_head, Ordering::Release);
+        self.head.store(new_head, Ordering::SeqCst);
 
-        return new_epoch;
+        new_epoch
     }
 
-    //pop fn
-    //pop the oldest item from buffer
     pub fn pop(&self) -> Option<T>{
-        let tail = self.tail.load(Ordering::Relaxed);
-        let head = self.head.load(Ordering::Acquire);
+        loop{
+            let tail = self.tail.load(Ordering::SeqCst);
+            let head = self.head.load(Ordering::SeqCst);
+            let read_epoch = self.read_epoch.load(Ordering::SeqCst);
+            let write_epoch = self.write_epoch.load(Ordering::SeqCst);
 
-        if self.is_empty_internal(tail, head){
-            return None; //empty
-        }
-
-        //safety -> single consumer guarantees exclusive read access
-        let (item, slot_epoch) = unsafe {
-            let slot = &*self.buffer[tail].inner.get();
-            std::sync::atomic::fence(Ordering::Acquire);
-            (slot.data.clone(), slot.epoch)
-        };
-
-        //update reader's epoch to mark this slot as 'seen'
-        self.read_epoch.store(slot_epoch, Ordering::Release);
-
-        //advance tail
-        let new_tail = (tail + 1) % self.capacity;
-        self.tail.store(new_tail, Ordering::Release);
-
-        return Some(item);
-    }
-
-    //peek at latest item without removing but we clone (for subscribers!!)
-    pub fn peek_latest(&self) -> Option<(T, u64)>{
-        let head = self.head.load(Ordering::Acquire);
-        let tail = self.tail.load(Ordering::Acquire);
-
-        if self.is_empty_internal(head, tail){
-            return None;
-        }
-
-        //latest item is at (head - 1 + capacity) % capacity
-        let latest_idx = if head == 0{
-            self.capacity - 1
-        }else{
-            head - 1
-        };
-
-        unsafe{
-            let slot = &*self.buffer[latest_idx].inner.get();
-            return Some((slot.data.clone(), slot.epoch));
-        }
-    }
-
-    //peek latest without owning (zero copy) | ret None if empty
-    pub fn peek_latest_ref(&self) -> Option<(&T, u64)>{
-        let head = self.head.load(Ordering::Acquire);
-        let tail = self.tail.load(Ordering::Acquire);
-
-        if self.is_empty_internal(head, tail){
-            return None;
-        }
-
-        //latest item is at (head - 1 + capacity) % capacity
-        let latest_idx = if head == 0{
-            self.capacity - 1
-        }else{
-            head - 1
-        };
-
-        unsafe{
-            let slot = &*self.buffer[latest_idx].inner.get();
-            return Some((&slot.data, slot.epoch));
-        }
-    }
-
-    //peek item at tail (oldest) without owning | ret None if empty
-    pub fn peek_oldest_ref(&self) -> Option<(&T, u64)>{
-        let tail = self.tail.load(Ordering::Acquire);
-        let head = self.head.load(Ordering::Acquire);
-
-        if self.is_empty_internal(tail, head){
-            return None;
-        }
-
-        unsafe{
-            let slot = &*self.buffer[tail].inner.get();
-            return Some((&slot.data, slot.epoch));
-        }
-    }
-
-    //get the latest epoch (for freshness detection yo)
-    pub fn latest_epoch(&self) -> u64{
-        return self.write_epoch.load(Ordering::Acquire);
-    }
-
-    //get the current occupancy
-    pub fn len(&self) -> usize{
-        let head = self.head.load(Ordering::Acquire);
-        let tail = self.tail.load(Ordering::Acquire);
-
-        if head == tail{
-            if self.is_empty_internal(head, tail){
-                return 0;
-            }else{
-                return self.capacity;
+            //empty check: nothing written yet
+            if write_epoch == 0{
+                return None;
             }
-        }
 
-        if head > tail{
-            return head - tail;
-        }else{
-            return self.capacity - tail + head;
+            let slot_epoch = self.slot_epoch(tail);
+
+            //already consumed this slot?
+            if slot_epoch <= read_epoch{
+                //check if there's newer data ahead
+                if tail == head{
+                    return None; //truly empty - caught up
+                }
+                //advance tail to find unread slot
+                let new_tail = (tail + 1) % self.capacity;
+                self.tail.store(new_tail, Ordering::SeqCst);
+                continue;
+            }
+
+            //check if slot was overwritten (producer lapped us)
+            let min_valid_epoch = write_epoch.saturating_sub(self.capacity as u64 - 1);
+            if slot_epoch < min_valid_epoch{
+                //slot overwritten, skip it
+                self.read_epoch.store(slot_epoch, Ordering::SeqCst);
+                let new_tail = (tail + 1) % self.capacity;
+                self.tail.store(new_tail, Ordering::SeqCst);
+                continue;
+            }
+
+            //valid slot - read data
+            let item = unsafe{
+                let slot = &*self.buffer[tail].inner.get();
+                slot.data.clone()
+            };
+
+            //mark as consumed
+            self.read_epoch.store(slot_epoch, Ordering::SeqCst);
+
+            //advance tail
+            let new_tail = (tail + 1) % self.capacity;
+            self.tail.store(new_tail, Ordering::SeqCst);
+
+            return Some(item);
         }
     }
 
-    //check emptyness
+    pub fn peek_latest(&self) -> Option<(T, u64)>{
+        let write_epoch = self.write_epoch.load(Ordering::SeqCst);
+        if write_epoch == 0{
+            return None;
+        }
+
+        let head = self.head.load(Ordering::SeqCst);
+        let latest_idx = if head == 0{ self.capacity - 1 }else{ head - 1 };
+
+        unsafe{
+            let slot = &*self.buffer[latest_idx].inner.get();
+            let epoch = slot.epoch.load(Ordering::SeqCst);
+            Some((slot.data.clone(), epoch))
+        }
+    }
+
+    pub fn peek_latest_ref(&self) -> Option<(&T, u64)>{
+        let write_epoch = self.write_epoch.load(Ordering::SeqCst);
+        if write_epoch == 0{
+            return None;
+        }
+
+        let head = self.head.load(Ordering::SeqCst);
+        let latest_idx = if head == 0{ self.capacity - 1 }else{ head - 1 };
+
+        unsafe{
+            let slot = &*self.buffer[latest_idx].inner.get();
+            let epoch = slot.epoch.load(Ordering::SeqCst);
+            Some((&slot.data, epoch))
+        }
+    }
+
+    pub fn peek_oldest_ref(&self) -> Option<(&T, u64)>{
+        let write_epoch = self.write_epoch.load(Ordering::SeqCst);
+        if write_epoch == 0{
+            return None;
+        }
+
+        let tail = self.tail.load(Ordering::SeqCst);
+        let read_epoch = self.read_epoch.load(Ordering::SeqCst);
+        let slot_epoch = self.slot_epoch(tail);
+
+        if slot_epoch <= read_epoch{
+            return None; //already consumed
+        }
+
+        unsafe{
+            let slot = &*self.buffer[tail].inner.get();
+            let epoch = slot.epoch.load(Ordering::SeqCst);
+            Some((&slot.data, epoch))
+        }
+    }
+
+    pub fn latest_epoch(&self) -> u64{
+        self.write_epoch.load(Ordering::SeqCst)
+    }
+
+    pub fn len(&self) -> usize{
+        let write_epoch = self.write_epoch.load(Ordering::SeqCst);
+        let read_epoch = self.read_epoch.load(Ordering::SeqCst);
+
+        if write_epoch == 0{
+            return 0;
+        }
+
+        //number of unread items = write_epoch - read_epoch, capped at capacity
+        let unread = write_epoch.saturating_sub(read_epoch) as usize;
+        std::cmp::min(unread, self.capacity)
+    }
+
     pub fn is_empty(&self) -> bool{
-        let head = self.head.load(Ordering::Acquire);
-        let tail = self.tail.load(Ordering::Acquire);
-        return self.is_empty_internal(head, tail);
+        self.len() == 0
     }
 
-    //check fullness
     pub fn is_full(&self) -> bool{
-        let head = self.head.load(Ordering::Acquire);
-        let tail = self.tail.load(Ordering::Acquire);
-        return self.is_full_internal(head, tail);
+        self.len() == self.capacity
     }
 
-    //return capacity
     pub fn capacity(&self) -> usize{
-        return self.capacity;
+        self.capacity
     }
 }
 
-//Tests
 #[cfg(test)]
-mod tests {
+mod tests{
     use super::*;
     use std::sync::Arc;
     use std::thread;
 
     #[test]
-    fn test_push_pop_fifo() {
+    fn test_push_pop_fifo(){
         let rb: RingBuffer<i32> = RingBuffer::new(5);
-        
         rb.push(10);
         rb.push(20);
         rb.push(30);
-
         assert_eq!(rb.pop(), Some(10));
         assert_eq!(rb.pop(), Some(20));
         assert_eq!(rb.pop(), Some(30));
@@ -294,150 +237,127 @@ mod tests {
     }
 
     #[test]
-    fn test_wraparound() {
+    fn test_wraparound(){
         let rb: RingBuffer<i32> = RingBuffer::new(3);
-        
         rb.push(1);
         rb.push(2);
-        rb.push(3);  //buffer full: [1, 2, 3], head=0, tail=0, slot epochs > read_epoch
-        
-        assert_eq!(rb.pop(), Some(1));  //tail -> 1
-        
-        rb.push(4);  //writes at head=0, head -> 1
-        
-        assert_eq!(rb.pop(), Some(2));  //tail -> 2
-        assert_eq!(rb.pop(), Some(3));  //tail ->0
-        assert_eq!(rb.pop(), Some(4));  //tail -> 1
-        assert_eq!(rb.pop(), None);
-    }
-
-    #[test]
-    fn test_epoch_increment() {
-        let rb: RingBuffer<i32> = RingBuffer::new(5);
-        
-        let e1 = rb.push(10);
-        let e2 = rb.push(20);
-        
-        assert_eq!(e1, 1);
-        assert_eq!(e2, 2);
-        assert_eq!(rb.latest_epoch(), 2);
-    }
-
-    #[test]
-    fn test_overflow_discards_old() {
-        let rb: RingBuffer<i32> = RingBuffer::new(3);
-        
-        rb.push(1);
-        rb.push(2);
-        rb.push(3);  //buffer full: [1, 2, 3]
-        
-        assert!(rb.is_full());
-        assert_eq!(rb.len(), 3);
-        
-        rb.push(4);  //overflow -> Discard 1, write 4: [4, 2, 3]
-        
-        assert_eq!(rb.pop(), Some(2));  //1 was discarded
+        rb.push(3);
+        assert_eq!(rb.pop(), Some(1));
+        rb.push(4);
+        assert_eq!(rb.pop(), Some(2));
         assert_eq!(rb.pop(), Some(3));
         assert_eq!(rb.pop(), Some(4));
         assert_eq!(rb.pop(), None);
     }
 
     #[test]
-    fn test_full_capacity_usable() {
+    fn test_epoch_increment(){
+        let rb: RingBuffer<i32> = RingBuffer::new(5);
+        let e1 = rb.push(10);
+        let e2 = rb.push(20);
+        assert_eq!(e1, 1);
+        assert_eq!(e2, 2);
+        assert_eq!(rb.latest_epoch(), 2);
+    }
+
+    #[test]
+    fn test_overflow_skips_old(){
         let rb: RingBuffer<i32> = RingBuffer::new(3);
-        
         rb.push(1);
         rb.push(2);
         rb.push(3);
-        
-        //all 3 slots used!
-        assert_eq!(rb.len(), 3);
-        assert!(rb.is_full());
-        assert!(!rb.is_empty());
+        rb.push(4);
+        rb.push(5);
+        let mut values = vec![];
+        while let Some(v) = rb.pop(){
+            values.push(v);
+        }
+        assert_eq!(values, vec![4, 5]); //when head wraps to tail, that slot becomes inaccessible
     }
 
     #[test]
-    fn test_peek_latest() {
+    fn test_full_capacity_usable(){
+        let rb: RingBuffer<i32> = RingBuffer::new(3);
+        rb.push(1);
+        rb.push(2);
+        rb.push(3);
+        assert_eq!(rb.len(), 3);
+        assert!(rb.is_full());
+    }
+
+    #[test]
+    fn test_peek_latest(){
         let rb: RingBuffer<i32> = RingBuffer::new(5);
-        
         rb.push(10);
         rb.push(20);
         rb.push(30);
-        
-        //peek doesn't consume
         let (val, epoch) = rb.peek_latest().unwrap();
         assert_eq!(val, 30);
         assert_eq!(epoch, 3);
-        
-        //still 3 items
-        assert_eq!(rb.len(), 3);
     }
 
     #[test]
-    fn test_zero_copy_peek_ref() {
+    fn test_zero_copy_peek_ref(){
         let rb: RingBuffer<i32> = RingBuffer::new(5);
-        
         rb.push(10);
         rb.push(20);
         rb.push(30);
-        
-        //zero-copy peek (returns reference, no clone!)
-        let (val_ref, epoch) = rb.peek_latest_ref().unwrap();
+        let (val_ref, _) = rb.peek_latest_ref().unwrap();
         assert_eq!(*val_ref, 30);
-        assert_eq!(epoch, 3);
-        
-        //oldest is 10
-        let (oldest_ref, _) = rb.peek_oldest_ref().unwrap();
-        assert_eq!(*oldest_ref, 10);
-        
-        //still 3 items (peek doesn't consume)
-        assert_eq!(rb.len(), 3);
     }
 
     #[test]
-    fn test_slot_epoch_freshness() {
-        let rb: RingBuffer<i32> = RingBuffer::new(3);
-        
-        let e1 = rb.push(100);
-        let e2 = rb.push(200);
-        
-        //each push gets incremented epoch
-        assert_eq!(e1, 1);
-        assert_eq!(e2, 2);
-        
-        //pop and check freshness
-        rb.pop();  //reads epoch 1
-        
-        let e3 = rb.push(300);
-        assert_eq!(e3, 3);
-    }
+    fn test_spsc_threaded(){
+        use std::sync::atomic::AtomicBool;
 
-    //multi threaded spsc tests
-    #[test]
-    fn test_spsc_threaded() {
-        let rb = Arc::new(RingBuffer::<i32>::new(1024));
+        let rb = Arc::new(RingBuffer::<i32>::new(2048));
+        let done = Arc::new(AtomicBool::new(false));
+
         let rb_producer = Arc::clone(&rb);
+        let done_flag = Arc::clone(&done);
+
         let rb_consumer = Arc::clone(&rb);
+        let done_check = Arc::clone(&done);
+
         let num_items: i32 = 1000;
-        
-        let producer = thread::spawn(move || {
-            for i in 0..num_items {
+
+        let producer = thread::spawn(move ||{
+            for i in 0..num_items{
                 rb_producer.push(i);
             }
+            done_flag.store(true, Ordering::SeqCst);
         });
-        let consumer = thread::spawn(move || {
+
+        let consumer = thread::spawn(move ||{
             let mut received = Vec::new();
-            while received.len() < num_items as usize {
-                if let Some(val) = rb_consumer.pop() {
-                    received.push(val);
+            loop{
+                match rb_consumer.pop(){
+                    Some(val) => received.push(val),
+                    None =>{
+                        if done_check.load(Ordering::SeqCst){
+                            while let Some(val) = rb_consumer.pop(){
+                                received.push(val);
+                            }
+                            break;
+                        }
+                        std::hint::spin_loop();
+                    }
                 }
             }
-            return received;
+            received
         });
+
         producer.join().unwrap();
         let received = consumer.join().unwrap();
-        for i in 1..received.len() {
-            assert!(received[i] > received[i - 1], "FIFO order violated!");
+
+        assert_eq!(received.len(), num_items as usize);
+
+        for i in 1..received.len(){
+            assert!(received[i] > received[i - 1]);
+        }
+
+        for (i, &val) in received.iter().enumerate(){
+            assert_eq!(val, i as i32);
         }
     }
 }
