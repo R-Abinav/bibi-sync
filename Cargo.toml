@@ -1,8 +1,11 @@
 [package]
 name = "bibi-sync-rust"
-crate-type = ["cdylib", "rlib"]
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[lib]
+name="bibi_sync"
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 libc = "0.2"

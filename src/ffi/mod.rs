@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::ptr;
 use crate::pubsub::{TopicRegistry, ByteTopic};
 
-//opaque handle types for C
 pub struct BibiRegistry{
     inner: TopicRegistry,
 }
@@ -12,7 +11,6 @@ pub struct BibiByteTopic{
     inner: Arc<ByteTopic>,
 }
 
-//registry functions
 #[no_mangle]
 pub extern "C" fn bibi_registry_new() -> *mut BibiRegistry{
     let registry = Box::new(BibiRegistry{
@@ -24,11 +22,10 @@ pub extern "C" fn bibi_registry_new() -> *mut BibiRegistry{
 #[no_mangle]
 pub unsafe extern "C" fn bibi_registry_free(registry: *mut BibiRegistry){
     if !registry.is_null(){
-        drop(Box::from_raw(registry));
+        unsafe{ drop(Box::from_raw(registry)); }
     }
 }
 
-//byte topic functions
 #[no_mangle]
 pub unsafe extern "C" fn bibi_registry_get_byte_topic(
     registry: *mut BibiRegistry,
@@ -39,21 +36,23 @@ pub unsafe extern "C" fn bibi_registry_get_byte_topic(
         return ptr::null_mut();
     }
 
-    let reg = &mut *registry;
-    let name_str = match CStr::from_ptr(name).to_str(){
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(),
-    };
+    unsafe{
+        let reg = &mut *registry;
+        let name_str = match CStr::from_ptr(name).to_str(){
+            Ok(s) => s,
+            Err(_) => return ptr::null_mut(),
+        };
 
-    let topic = reg.inner.get_or_create_byte(name_str, capacity);
-    let handle = Box::new(BibiByteTopic{ inner: topic });
-    Box::into_raw(handle)
+        let topic = reg.inner.get_or_create_byte(name_str, capacity);
+        let handle = Box::new(BibiByteTopic{ inner: topic });
+        Box::into_raw(handle)
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn bibi_byte_topic_free(topic: *mut BibiByteTopic){
     if !topic.is_null(){
-        drop(Box::from_raw(topic));
+        unsafe{ drop(Box::from_raw(topic)); }
     }
 }
 
@@ -67,12 +66,14 @@ pub unsafe extern "C" fn bibi_byte_topic_publish(
         return 0;
     }
 
-    let t = &*topic;
-    let slice = std::slice::from_raw_parts(data, len);
-    
-    match t.inner.publish(slice){
-        Some(epoch) => epoch,
-        None => 0,
+    unsafe{
+        let t = &*topic;
+        let slice = std::slice::from_raw_parts(data, len);
+        
+        match t.inner.publish(slice){
+            Some(epoch) => epoch,
+            None => 0,
+        }
     }
 }
 
@@ -87,18 +88,20 @@ pub unsafe extern "C" fn bibi_byte_topic_try_receive(
         return -1;
     }
 
-    let t = &*topic;
-    
-    match t.inner.try_receive(){
-        Some((data, _epoch)) =>{
-            if data.len() > max_len{
-                return -2; //buffer too small
+    unsafe{
+        let t = &*topic;
+        
+        match t.inner.try_receive(){
+            Some((data, _epoch)) =>{
+                if data.len() > max_len{
+                    return -2;
+                }
+                ptr::copy_nonoverlapping(data.as_ptr(), out_data, data.len());
+                *out_len = data.len();
+                1
             }
-            ptr::copy_nonoverlapping(data.as_ptr(), out_data, data.len());
-            *out_len = data.len();
-            1 //success
+            None => 0,
         }
-        None => 0, //no data
     }
 }
 
@@ -114,21 +117,23 @@ pub unsafe extern "C" fn bibi_byte_topic_peek_latest(
         return -1;
     }
 
-    let t = &*topic;
-    
-    match t.inner.peek_latest(){
-        Some((data, epoch)) =>{
-            if data.len() > max_len{
-                return -2;
+    unsafe{
+        let t = &*topic;
+        
+        match t.inner.peek_latest(){
+            Some((data, epoch)) =>{
+                if data.len() > max_len{
+                    return -2;
+                }
+                ptr::copy_nonoverlapping(data.as_ptr(), out_data, data.len());
+                *out_len = data.len();
+                if !out_epoch.is_null(){
+                    *out_epoch = epoch;
+                }
+                1
             }
-            ptr::copy_nonoverlapping(data.as_ptr(), out_data, data.len());
-            *out_len = data.len();
-            if !out_epoch.is_null(){
-                *out_epoch = epoch;
-            }
-            1
+            None => 0,
         }
-        None => 0,
     }
 }
 
@@ -137,8 +142,10 @@ pub unsafe extern "C" fn bibi_byte_topic_len(topic: *mut BibiByteTopic) -> usize
     if topic.is_null(){
         return 0;
     }
-    let t = &*topic;
-    t.inner.len()
+    unsafe{
+        let t = &*topic;
+        t.inner.len()
+    }
 }
 
 #[no_mangle]
@@ -146,8 +153,10 @@ pub unsafe extern "C" fn bibi_byte_topic_is_empty(topic: *mut BibiByteTopic) -> 
     if topic.is_null(){
         return true;
     }
-    let t = &*topic;
-    t.inner.is_empty()
+    unsafe{
+        let t = &*topic;
+        t.inner.is_empty()
+    }
 }
 
 #[no_mangle]
@@ -155,12 +164,11 @@ pub unsafe extern "C" fn bibi_byte_topic_latest_epoch(topic: *mut BibiByteTopic)
     if topic.is_null(){
         return 0;
     }
-    let t = &*topic;
-    t.inner.latest_epoch()
+    unsafe{
+        let t = &*topic;
+        t.inner.latest_epoch()
+    }
 }
-
-//typed topic for fixed-size structs (IMU, etc)
-//uses raw bytes with known struct size
 
 pub struct BibiTypedTopic{
     inner: Arc<ByteTopic>,
@@ -178,21 +186,23 @@ pub unsafe extern "C" fn bibi_registry_get_typed_topic(
         return ptr::null_mut();
     }
 
-    let reg = &mut *registry;
-    let name_str = match CStr::from_ptr(name).to_str(){
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(),
-    };
+    unsafe{
+        let reg = &mut *registry;
+        let name_str = match CStr::from_ptr(name).to_str(){
+            Ok(s) => s,
+            Err(_) => return ptr::null_mut(),
+        };
 
-    let topic = reg.inner.get_or_create_byte(name_str, capacity);
-    let handle = Box::new(BibiTypedTopic{ inner: topic, msg_size });
-    Box::into_raw(handle)
+        let topic = reg.inner.get_or_create_byte(name_str, capacity);
+        let handle = Box::new(BibiTypedTopic{ inner: topic, msg_size });
+        Box::into_raw(handle)
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn bibi_typed_topic_free(topic: *mut BibiTypedTopic){
     if !topic.is_null(){
-        drop(Box::from_raw(topic));
+        unsafe{ drop(Box::from_raw(topic)); }
     }
 }
 
@@ -205,12 +215,14 @@ pub unsafe extern "C" fn bibi_typed_topic_publish(
         return 0;
     }
 
-    let t = &*topic;
-    let slice = std::slice::from_raw_parts(data, t.msg_size);
-    
-    match t.inner.publish(slice){
-        Some(epoch) => epoch,
-        None => 0,
+    unsafe{
+        let t = &*topic;
+        let slice = std::slice::from_raw_parts(data, t.msg_size);
+        
+        match t.inner.publish(slice){
+            Some(epoch) => epoch,
+            None => 0,
+        }
     }
 }
 
@@ -223,17 +235,19 @@ pub unsafe extern "C" fn bibi_typed_topic_try_receive(
         return -1;
     }
 
-    let t = &*topic;
-    
-    match t.inner.try_receive(){
-        Some((data, _epoch)) =>{
-            if data.len() != t.msg_size{
-                return -2; //size mismatch
+    unsafe{
+        let t = &*topic;
+        
+        match t.inner.try_receive(){
+            Some((data, _epoch)) =>{
+                if data.len() != t.msg_size{
+                    return -2;
+                }
+                ptr::copy_nonoverlapping(data.as_ptr(), out_data, t.msg_size);
+                1
             }
-            ptr::copy_nonoverlapping(data.as_ptr(), out_data, t.msg_size);
-            1
+            None => 0,
         }
-        None => 0,
     }
 }
 
@@ -247,20 +261,22 @@ pub unsafe extern "C" fn bibi_typed_topic_peek_latest(
         return -1;
     }
 
-    let t = &*topic;
-    
-    match t.inner.peek_latest(){
-        Some((data, epoch)) =>{
-            if data.len() != t.msg_size{
-                return -2;
+    unsafe{
+        let t = &*topic;
+        
+        match t.inner.peek_latest(){
+            Some((data, epoch)) =>{
+                if data.len() != t.msg_size{
+                    return -2;
+                }
+                ptr::copy_nonoverlapping(data.as_ptr(), out_data, t.msg_size);
+                if !out_epoch.is_null(){
+                    *out_epoch = epoch;
+                }
+                1
             }
-            ptr::copy_nonoverlapping(data.as_ptr(), out_data, t.msg_size);
-            if !out_epoch.is_null(){
-                *out_epoch = epoch;
-            }
-            1
+            None => 0,
         }
-        None => 0,
     }
 }
 
@@ -285,12 +301,10 @@ mod tests{
             let topic = bibi_registry_get_byte_topic(registry, name.as_ptr(), 8);
             assert!(!topic.is_null());
 
-            //publish
             let data: [u8; 3] = [1, 2, 3];
             let epoch = bibi_byte_topic_publish(topic, data.as_ptr(), 3);
             assert_eq!(epoch, 1);
 
-            //receive
             let mut out_data: [u8; 256] = [0; 256];
             let mut out_len: usize = 0;
             let result = bibi_byte_topic_try_receive(
@@ -329,13 +343,11 @@ mod tests{
                 std::mem::size_of::<ImuMsg>(),
             );
 
-            //publish
             let msg = ImuMsg{ accel_x: 1.0, accel_y: 2.0, accel_z: 9.8 };
             let msg_ptr = &msg as *const ImuMsg as *const u8;
             let epoch = bibi_typed_topic_publish(topic, msg_ptr);
             assert_eq!(epoch, 1);
 
-            //receive
             let mut out_msg = ImuMsg{ accel_x: 0.0, accel_y: 0.0, accel_z: 0.0 };
             let out_ptr = &mut out_msg as *mut ImuMsg as *mut u8;
             let result = bibi_typed_topic_try_receive(topic, out_ptr);
@@ -359,11 +371,9 @@ mod tests{
             let topic1 = bibi_registry_get_byte_topic(registry, name.as_ptr(), 8);
             let topic2 = bibi_registry_get_byte_topic(registry, name.as_ptr(), 8);
 
-            //publish on topic1
             let data: [u8; 2] = [0xAB, 0xCD];
             bibi_byte_topic_publish(topic1, data.as_ptr(), 2);
 
-            //receive on topic2 (shared buffer!)
             let mut out_data: [u8; 256] = [0; 256];
             let mut out_len: usize = 0;
             let result = bibi_byte_topic_try_receive(topic2, out_data.as_mut_ptr(), &mut out_len, 256);
