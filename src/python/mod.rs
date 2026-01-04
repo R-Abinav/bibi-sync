@@ -119,11 +119,94 @@ impl PyBibiTypedTopic{
     }
 }
 
+// AUV Controller Python bindings
+use crate::auv::{AuvController, thrust_mixer::ThrustCommand};
+
+#[pyclass]
+pub struct PyAuvController {
+    inner: Arc<AuvController>,
+    _handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[pymethods]
+impl PyAuvController {
+    #[new]
+    #[pyo3(signature = (port = "/dev/ttyACM0", baud = 9600))]
+    fn new(port: &str, baud: u32) -> Self {
+        let controller = Arc::new(AuvController::new(port).with_baud(baud));
+        let ctrl = controller.clone();
+        let handle = ctrl.start_background();
+        
+        // Give it time to connect
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        
+        PyAuvController {
+            inner: controller,
+            _handle: Some(handle),
+        }
+    }
+    
+    fn set_surge(&self, value: f32) {
+        self.inner.set_surge(value);
+    }
+    
+    fn set_sway(&self, value: f32) {
+        self.inner.set_sway(value);
+    }
+    
+    fn set_heave(&self, value: f32) {
+        self.inner.set_heave(value);
+    }
+    
+    fn set_roll(&self, value: f32) {
+        self.inner.set_roll(value);
+    }
+    
+    fn set_pitch(&self, value: f32) {
+        self.inner.set_pitch(value);
+    }
+    
+    fn set_yaw(&self, value: f32) {
+        self.inner.set_yaw(value);
+    }
+    
+    fn set_thrust(&self, surge: f32, sway: f32, heave: f32, roll: f32, pitch: f32, yaw: f32) {
+        self.inner.set_thrust(ThrustCommand {
+            surge, sway, heave, roll, pitch, yaw
+        });
+    }
+    
+    fn stop(&self) {
+        self.inner.stop();
+    }
+    
+    fn get_orientation(&self) -> Option<(f32, f32, f32)> {
+        self.inner.get_orientation()
+    }
+    
+    fn get_depth(&self) -> Option<f32> {
+        self.inner.get_depth()
+    }
+    
+    fn shutdown(&self) {
+        self.inner.stop();
+        self.inner.shutdown();
+    }
+}
+
+impl Drop for PyAuvController {
+    fn drop(&mut self) {
+        self.inner.stop();
+        self.inner.shutdown();
+    }
+}
+
 #[pymodule]
 fn bibi_sync(_py: Python, m: &PyModule) -> PyResult<()>{
     m.add_class::<PyBibiRegistry>()?;
     m.add_class::<PyBibiByteTopic>()?;
     m.add_class::<PyBibiTypedTopic>()?;
+    m.add_class::<PyAuvController>()?;
     Ok(())
 }
 

@@ -24,3 +24,7 @@ cbindgen = "0.26"
 [[example]]
 name = "stm32_test"
 path = "examples/stm32_test.rs"
+
+[[bin]]
+name = "auv_controller"
+path = "src/bin/auv_controller.rs"

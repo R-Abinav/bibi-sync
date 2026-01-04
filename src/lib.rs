@@ -2,6 +2,7 @@ pub mod ring_buffer;
 pub mod pubsub;
 pub mod ffi;
 pub mod uart;
+pub mod auv;
 
 #[cfg(feature = "python")]
 pub mod python;
