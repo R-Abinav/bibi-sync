@@ -8,15 +8,15 @@
  */
 
 use bibi_sync::{
-    TopicRegistry, MsgType, ThrusterPwmCmd, ImuMsg, OrientationMsg, DepthMsg,
-    SYNC_BYTE, MAX_MSG_SIZE,
+    MsgType, ThrusterPwmCmd, ImuMsg, OrientationMsg, DepthMsg,
 };
 use std::io::{Read, Write};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use serialport::SerialPort;
 
 const BAUD_RATE: u32 = 9600;
+const SYNC_BYTE: u8 = 0xAA;
+const MAX_MSG_SIZE: usize = 244;
 
 fn calculate_checksum(data: &[u8]) -> u8 {
     data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b))
@@ -155,9 +155,15 @@ fn main() {
                             if let Some(imu) = ImuMsg::from_bytes(&payload) {
                                 imu_count += 1;
                                 if imu_count % 10 == 1 {
+                                    // Copy values to avoid packed struct issues
+                                    let ax = imu.accel_x;
+                                    let ay = imu.accel_y;
+                                    let az = imu.accel_z;
+                                    let gx = imu.gyro_x;
+                                    let gy = imu.gyro_y;
+                                    let gz = imu.gyro_z;
                                     println!("[IMU] accel=({:.2}, {:.2}, {:.2}) gyro=({:.2}, {:.2}, {:.2})",
-                                        imu.accel_x, imu.accel_y, imu.accel_z,
-                                        imu.gyro_x, imu.gyro_y, imu.gyro_z);
+                                        ax, ay, az, gx, gy, gz);
                                 }
                             }
                         }
@@ -165,16 +171,22 @@ fn main() {
                             if let Some(orient) = OrientationMsg::from_bytes(&payload) {
                                 orientation_count += 1;
                                 if orientation_count % 10 == 1 {
+                                    // Copy values to avoid packed struct issues
+                                    let roll = orient.roll;
+                                    let pitch = orient.pitch;
+                                    let yaw = orient.yaw;
                                     println!("[ORIENT] roll={:.1}° pitch={:.1}° yaw={:.1}°",
-                                        orient.roll, orient.pitch, orient.yaw);
+                                        roll, pitch, yaw);
                                 }
                             }
                         }
                         MsgType::Depth => {
-                            if let Some(depth) = DepthMsg::from_bytes(&payload) {
+                            if let Some(d) = DepthMsg::from_bytes(&payload) {
                                 depth_count += 1;
                                 if depth_count % 10 == 1 {
-                                    println!("[DEPTH] {:.3} m", depth.depth);
+                                    // Copy value to avoid packed struct issues
+                                    let depth_val = d.depth;
+                                    println!("[DEPTH] {:.3} m", depth_val);
                                 }
                             }
                         }
