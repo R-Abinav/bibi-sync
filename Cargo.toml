@@ -20,3 +20,7 @@ python = ["pyo3"]
 cbindgen = "0.26"
 
 [dev-dependencies]
+
+[[example]]
+name = "stm32_test"
+path = "examples/stm32_test.rs"
