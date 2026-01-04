@@ -19,8 +19,11 @@ pub enum MsgType{
     Depth = 0x02,
     Thruster = 0x03,
     Heartbeat = 0x04,
+    Orientation = 0x05,  
     Command = 0x10,
     Ack = 0x11,
+    Led = 0x12,          
+    Calibration = 0x13,  
 }
 
 impl MsgType{
@@ -30,8 +33,11 @@ impl MsgType{
             0x02 => Some(MsgType::Depth),
             0x03 => Some(MsgType::Thruster),
             0x04 => Some(MsgType::Heartbeat),
+            0x05 => Some(MsgType::Orientation),
             0x10 => Some(MsgType::Command),
             0x11 => Some(MsgType::Ack),
+            0x12 => Some(MsgType::Led),
+            0x13 => Some(MsgType::Calibration),
             _ => None,
         }
     }
@@ -42,8 +48,11 @@ impl MsgType{
             MsgType::Depth => "/stm32/depth",
             MsgType::Thruster => "/stm32/thruster",
             MsgType::Heartbeat => "/stm32/heartbeat",
+            MsgType::Orientation => "/stm32/orientation",
             MsgType::Command => "/stm32/command",
             MsgType::Ack => "/stm32/ack",
+            MsgType::Led => "/stm32/led",
+            MsgType::Calibration => "/stm32/calibration",
         }
     }
 }
