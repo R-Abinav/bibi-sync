@@ -28,3 +28,7 @@ path = "examples/stm32_test.rs"
 [[bin]]
 name = "auv_controller"
 path = "src/bin/auv_controller.rs"
+
+[[example]]
+name = "latency_metrics"
+path = "examples/latency_metrics.rs"

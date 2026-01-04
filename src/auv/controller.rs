@@ -14,7 +14,7 @@ use std::time::Duration;
 use std::io::{Read, Write};
 
 use crate::pubsub::TopicRegistry;
-use crate::uart::protocol::{MsgType, ThrusterPwmCmd, ImuMsg, OrientationMsg, DepthMsg};
+use crate::{MsgType, ThrusterPwmCmd, ImuMsg, OrientationMsg, DepthMsg};
 use super::thrust_mixer::{ThrustMixer, ThrustCommand};
 
 const SYNC_BYTE: u8 = 0xAA;
